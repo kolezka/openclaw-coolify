@@ -1,71 +1,45 @@
 # openclaw-coolify
 
-Docker Compose deployment of [OpenClaw](https://github.com/openclaw/openclaw)
-for Coolify, wired to talk to a self-hosted LiteLLM proxy instead of calling
-LLM providers directly.
+[OpenClaw](https://github.com/openclaw/openclaw) on Coolify, routed through a LiteLLM proxy.
 
-This repo deploys the official `openclaw/openclaw` image. It does not use the
-`coollabsio/openclaw` fork, so there is no env-driven model config — the
-LiteLLM connection is wired up once, by hand, through the OpenClaw dashboard
-after first deploy.
-
-## What's here
-
-- `docker-compose.yml` — the OpenClaw gateway service. Port `18789` (dashboard
-  and API) is published so Coolify's proxy can attach a domain to it. Port
-  `18791` (bridge) is only exposed inside the Docker network, not published to
-  the host — nothing outside the stack talks to it directly.
-- `.env.example` — variables Coolify needs. Copy the values into the app's
-  environment settings in Coolify; never commit a real `.env` (this repo is
-  public).
+The official image binds to loopback and has no model configured. This repo adds a
+`Dockerfile` that starts the gateway with `--bind lan` and seeds `openclaw.json` on first
+boot. The config references env vars (`${LITELLM_API_KEY}` etc.), which OpenClaw resolves
+at load time, so no secret is written to disk and changing a value in Coolify takes
+effect on restart.
 
 ## Deploy
 
-1. **Create the app in Coolify.**
-   New Resource -> Docker Compose -> point at this repo/branch. Pick the
-   server that will run it.
-2. **Set environment variables** (from `.env.example`):
-   - `OPENCLAW_VERSION` — pin to a real release tag from the
-     [releases page](https://github.com/openclaw/openclaw/releases); don't
-     deploy `latest`.
-   - `OPENCLAW_GATEWAY_TOKEN` — `openssl rand -hex 32`.
-   - `OPENCLAW_ALLOWED_ORIGINS` — leave blank on the very first deploy, then
-     set it to the domain Coolify assigns once you know it, and redeploy.
-3. **Deploy**, then attach a domain to the `18789` port if Coolify didn't do
-   it automatically.
-4. **Onboard the agent.** Exec into the running container:
+1. Coolify: New Resource, Docker Compose, point at this repo.
+2. Set the env vars from `.env.example`. All five are required; the container refuses to
+   start without them. `OPENCLAW_ALLOWED_ORIGINS` is the dashboard URL you will attach in
+   step 3, e.g. `https://openclaw.example.com`, so decide it before deploying.
+3. Attach the domain to port `18789`. That is the only exposed port. If an older deploy
+   attached a domain to `18791`, remove it in Coolify; that port is browser control, not
+   the dashboard.
+4. Deploy. Open the dashboard, paste `OPENCLAW_GATEWAY_TOKEN`. On "pairing required",
+   approve your browser from the container terminal in Coolify:
    ```
-   docker compose exec openclaw openclaw setup
-   docker compose exec openclaw openclaw dashboard   # prints a URL+token, open it
-   docker compose exec openclaw openclaw devices list
-   docker compose exec openclaw openclaw devices approve <REQUEST ID>
-   docker compose exec openclaw openclaw configure
+   node openclaw.mjs devices list
+   node openclaw.mjs devices approve <REQUEST_ID>
    ```
-5. **Wire up LiteLLM.** In the dashboard: Config -> Models -> add a custom
-   provider.
-   - Adapter: OpenAI-compatible
-   - Base URL: your LiteLLM proxy's public URL (`LITELLM_BASE_URL` in
-     `.env.example` — the value isn't read automatically, just copy it in
-     here)
-   - API key: a LiteLLM **virtual key**, not a raw provider key
-     (`LITELLM_API_KEY`)
 
-   Set this as the default model for the assistant so all chat traffic routes
-   through LiteLLM.
-6. **Enable a channel** (Telegram, during `openclaw configure` in step 4) if
-   you want to talk to it outside the dashboard.
-7. **Verify the integration, not just the connection.** Send a message and
-   confirm it shows up in LiteLLM's own spend logs / request logs for that
-   virtual key — a 200 from OpenClaw's chat screen doesn't by itself prove
-   the request went through LiteLLM rather than a provider key baked in
-   somewhere else.
+Use HTTPS for the domain. The dashboard needs a secure context outside localhost, so a
+plain `http://` hostname will connect but not authenticate.
 
-## Notes
+## LiteLLM
 
-- Config, memory and the agent workspace persist in the named volumes
-  `openclaw_config` and `openclaw_workspace` — they survive redeploys as long
-  as the volumes aren't removed.
-- If OpenClaw ever needs to reach LiteLLM over an internal Docker network
-  instead of a public URL (both deployed on the same Coolify server), swap
-  `LITELLM_BASE_URL` for the internal service hostname and drop the public
-  exposure on the LiteLLM side.
+`LITELLM_MODEL` is the `model_name` alias from your LiteLLM `model_list`. The seeded
+config declares it with a 128k context window and 8k max output; edit `openclaw.json`
+in the volume (or Config in the dashboard) if your model differs. To confirm traffic
+actually goes through LiteLLM, check its spend logs for the virtual key after a chat.
+
+## State
+
+Everything lives in the `openclaw_state` volume at `/home/node/.openclaw`. The seeded
+config is only copied when that file does not exist yet, so dashboard edits survive
+redeploys.
+
+The first version of this repo mounted volumes under `/root`, but the image runs as
+`node`, so that data landed in the container's writable layer. Before redeploying an app
+created from that version, copy it out: `docker cp <old-container>:/home/node/.openclaw ./export`.
