@@ -5,4 +5,4 @@ FROM ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}
 RUN mkdir -p /home/node/.openclaw
 COPY --chown=node:node openclaw.json /app/deploy/openclaw.json
 
-CMD ["sh", "-c", "[ -f /home/node/.openclaw/openclaw.json ] || cp /app/deploy/openclaw.json /home/node/.openclaw/; exec node openclaw.mjs gateway --allow-unconfigured --bind loopback"]
+CMD ["sh", "-c", "[ -f /home/node/.openclaw/openclaw.json ] || cp /app/deploy/openclaw.json /home/node/.openclaw/; exec node openclaw.mjs gateway --allow-unconfigured --bind lan"]
