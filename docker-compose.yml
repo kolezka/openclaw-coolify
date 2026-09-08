@@ -11,8 +11,8 @@ services:
       LITELLM_BASE_URL: ${LITELLM_BASE_URL:?required}
       LITELLM_API_KEY: ${LITELLM_API_KEY:?required}
       LITELLM_MODEL: ${LITELLM_MODEL:?required}
-    expose:
-      - "18789"
+    ports:
+      - "127.0.0.1:18789:18789"
     volumes:
       - openclaw_state:/home/node/.openclaw
 
