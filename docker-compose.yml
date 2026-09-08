@@ -1,0 +1,21 @@
+services:
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION:-2026.2.26}
+    restart: unless-stopped
+    shm_size: "1gb"
+    mem_limit: 2g
+    cpus: 2
+    environment:
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+      OPENCLAW_ALLOWED_ORIGINS: ${OPENCLAW_ALLOWED_ORIGINS}
+    ports:
+      - "18789:18789"
+    expose:
+      - "18791"
+    volumes:
+      - openclaw_config:/root/.openclaw
+      - openclaw_workspace:/root/openclaw/workspace
+
+volumes:
+  openclaw_config:
+  openclaw_workspace:
