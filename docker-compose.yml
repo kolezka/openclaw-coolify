@@ -13,8 +13,12 @@ services:
       LITELLM_MODEL: ${LITELLM_MODEL:?required}
     expose:
       - "18789"
+      - "18790"
     ports:
       - "127.0.0.1:18789:18789"
+      # Canvas host. OpenClaw runs it on gateway port + 1 from a second HTTP
+      # server and offers no setting to move it, so artifact links point here.
+      - "127.0.0.1:18790:18790"
     volumes:
       - openclaw_state:/home/node/.openclaw
 
