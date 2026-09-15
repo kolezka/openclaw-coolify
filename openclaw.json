@@ -29,7 +29,11 @@
               "text"
             ],
             "contextWindow": 1000000,
-            "maxTokens": 393216
+            "maxTokens": 393216,
+            "compat": {
+              "thinkingFormat": "deepseek",
+              "requiresReasoningContentOnAssistantMessages": true
+            }
           },
           {
             "id": "deepseek/deepseek-v4-flash",
@@ -39,7 +43,11 @@
               "text"
             ],
             "contextWindow": 1000000,
-            "maxTokens": 393216
+            "maxTokens": 393216,
+            "compat": {
+              "thinkingFormat": "deepseek",
+              "requiresReasoningContentOnAssistantMessages": true
+            }
           },
           {
             "id": "zai/glm-5.3",
