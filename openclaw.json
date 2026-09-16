@@ -28,7 +28,7 @@
             "input": [
               "text"
             ],
-            "contextWindow": 1000000,
+            "contextWindow": 900000,
             "maxTokens": 393216
           },
           {
@@ -38,7 +38,7 @@
             "input": [
               "text"
             ],
-            "contextWindow": 1000000,
+            "contextWindow": 900000,
             "maxTokens": 393216
           },
           {
@@ -48,7 +48,7 @@
             "input": [
               "text"
             ],
-            "contextWindow": 1000000,
+            "contextWindow": 900000,
             "maxTokens": 128000
           },
           {
@@ -59,7 +59,7 @@
               "text",
               "image"
             ],
-            "contextWindow": 1048576,
+            "contextWindow": 950000,
             "maxTokens": 128000
           },
           {
@@ -80,6 +80,9 @@
     "defaults": {
       "model": {
         "primary": "litellm/${LITELLM_MODEL}"
+      },
+      "compaction": {
+        "mode": "safeguard"
       }
     }
   }
