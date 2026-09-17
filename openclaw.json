@@ -90,5 +90,12 @@
         "primary": "litellm/${LITELLM_MODEL}"
       }
     }
+  },
+  "memory": {
+    "search": {
+      "enabled": true,
+      "provider": "litellm",
+      "model": "bge-m3"
+    }
   }
 }
