@@ -1,0 +1,9 @@
+services:
+  openclaw:
+    volumes:
+      - type: bind
+        source: ${OPENCLAW_BRAIN_PATH:?set an absolute path to the brain checkout on the Docker host}
+        target: /home/node/brain
+        read_only: false
+        bind:
+          create_host_path: false
