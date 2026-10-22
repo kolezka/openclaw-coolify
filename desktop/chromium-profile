@@ -1,0 +1,2 @@
+# Debian's Chromium launcher loads this for desktop-menu and CLI launches.
+CHROMIUM_FLAGS="${CHROMIUM_FLAGS:-} --user-data-dir=/home/node/.openclaw/desktop/chromium"

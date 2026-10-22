@@ -3,8 +3,14 @@ services:
     build:
       context: .
       args:
-        OPENCLAW_VERSION: ${OPENCLAW_VERSION:-2026.2.26}
+        OPENCLAW_VERSION: ${OPENCLAW_VERSION:-2026.10.1}
     restart: unless-stopped
+    # Chromium uses the hostname to recognize its own stale profile lock.
+    hostname: openclaw-desktop
+    shm_size: "1gb"
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./desktop/chromium-seccomp.json
     environment:
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?required}
       OPENCLAW_ALLOWED_ORIGINS: ${OPENCLAW_ALLOWED_ORIGINS:?required}
