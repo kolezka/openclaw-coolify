@@ -27,7 +27,7 @@ credentials or private state in its volume.
    ```
 
 Before redeploying an existing installation, confirm its actual image version and
-configuration compatibility. `OPENCLAW_VERSION` defaults to `2026.2.26`; that default
+configuration compatibility. `OPENCLAW_VERSION` defaults to `2026.10.1`; that default
 is not evidence of what an existing deployment runs. Do not downgrade a newer state
 volume blindly. Plain HTTP on a non-localhost domain does not provide the secure
 context needed by the dashboard.
@@ -278,3 +278,31 @@ They execute the Dockerfile's startup command against temporary files with a gat
 stub, validate the example model against the seed, and render the actual Compose files.
 A missing Compose executable fails the suite. Runtime checks with the pinned image
 and a disposable state volume are a separate requirement before deployment.
+
+### Local brain runtime acceptance
+
+Run the opt-in runtime suite against a local image built from this checkout:
+
+```sh
+python3 -B tests/brain-runtime.py --image <source-matched-local-image>
+```
+
+The suite explicitly uses the local `desktop-linux` Docker context, never pulls or
+builds an image, and rejects an image with the wrong startup command, user or release.
+It uses the real base and brain Compose files. A temporary third overlay removes
+published ports, disables networking and restart, and selects the supplied image.
+The hostname, shared memory, security options and named state mount remain intact.
+All credentials and host files are disposable fixtures. Resource names are unique;
+cleanup checks their identities before removing only those test containers and volumes.
+The supplied image is not removed.
+
+The six runtime tests check decoded host/container reads and writes through a path
+with spaces, UID/GID and installed desktop packages, a missing source that stays
+missing, and a nonroot permission error after a successful write control. They also
+start the real image entrypoint and command: a fresh seed must produce a live gateway,
+failed copies must exit with visible errors, and customized config must survive
+container replacement both with and without an available seed.
+
+This is separate from the desktop CUA smoke tests above. Local Docker Desktop results
+do not prove Linux/amd64 host permissions, Coolify overlay handling, existing-volume
+migration, skill activation or production readiness.
