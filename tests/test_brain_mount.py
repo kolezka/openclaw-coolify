@@ -14,6 +14,7 @@ FIXTURE_ENV = {
     "LITELLM_BASE_URL": "http://127.0.0.1:9/v1",
     "LITELLM_API_KEY": "fixture-key-not-a-secret",
     "LITELLM_MODEL": "deepseek/deepseek-v4-pro",
+    "DESKTOP_VNC_PASSWORD": "testpass",
 }
 
 
@@ -46,7 +47,7 @@ class BrainMountTests(unittest.TestCase):
         )
         self.assertEqual(
             [(port["host_ip"], port["target"]) for port in service["ports"]],
-            [("127.0.0.1", 18789), ("127.0.0.1", 18790)],
+            [("127.0.0.1", 18789), ("127.0.0.1", 18790), ("127.0.0.1", 5900)],
         )
 
     def test_overlay_preserves_state_and_ports(self):

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Web Browser
+Comment=Open Google Chrome, or Chromium on arm64
+Exec=openclaw-desktop-browser %U
+Icon=web-browser
+Terminal=false
+StartupNotify=true
+Categories=Network;WebBrowser;
