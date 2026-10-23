@@ -2,100 +2,58 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { GatewayClient } from '/app/dist/plugin-sdk/gateway-runtime.js';
+import { connectVnc } from './vnc-client.mjs';
 
-// Run only inside a disposable image container, without production volumes.
-setTimeout(() => {
-  console.error('Desktop smoke test exceeded its three-minute deadline');
-  process.exit(1);
-}, 180000).unref();
-assert.equal(process.getuid(), 1000, 'the gateway must run as node, not root');
+assert.equal(process.env.OPENCLAW_TEST_FIXTURE, '1', 'run only in a disposable test fixture');
+assert.equal(process.getuid(), 1000);
+const { GatewayClient } = await import('/app/dist/plugin-sdk/gateway-runtime.js');
+const watchdog = setTimeout(() => { console.error('Desktop smoke test timed out'); process.exit(1); }, 180000);
+watchdog.unref();
 const ownStatus = await readFile('/proc/self/status', 'utf8');
 assert.match(ownStatus, /^NoNewPrivs:\s+1$/m);
 assert.match(ownStatus, /^Seccomp:\s+2$/m);
-const config = JSON.parse(await readFile('/app/deploy/openclaw.json', 'utf8'));
-assert.equal(config.desktop?.host?.managed, true);
-assert.equal(config.plugins?.entries?.['cua-computer']?.enabled, true);
-const stateDir = '/tmp/openclaw-desktop-smoke';
-await mkdir(stateDir, { recursive: true });
-const token = randomUUID();
-config.gateway = { ...config.gateway, bind: 'loopback', auth: { mode: 'token', token } };
-config.agents.defaults.heartbeat = { every: '0m' };
-await writeFile(`${stateDir}/openclaw.json`, JSON.stringify(config));
-
+const token = process.env.OPENCLAW_GATEWAY_TOKEN;
+assert.ok(token);
+let loaded = false;
+let input = '';
 let submitted;
-let pageLoaded = false;
-const fixture = createServer((req, res) => {
+const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname === '/submit') {
-    submitted = url.searchParams.get('proof');
-    res.end('Desktop input received');
-    return;
-  }
-  if (url.pathname === '/ready') {
-    pageLoaded = true;
-    res.end('ready');
-    return;
-  }
+  if (url.pathname === '/ready') { loaded = true; res.end('ready'); return; }
+  if (url.pathname === '/progress') { input = url.searchParams.get('value'); res.end('received'); return; }
+  if (url.pathname === '/submit') { submitted = url.searchParams.get('proof'); res.end('received'); return; }
   res.setHeader('Content-Type', 'text/html');
   res.end('<title>Desktop smoke test</title><h1>Desktop smoke test</h1>' +
-    '<form action="/submit"><input name="proof" autofocus><button>Send</button></form>' +
-    '<script>addEventListener("load", () => { document.querySelector("input").focus(); fetch("/ready"); });</script>');
+    '<form action="/submit"><input name="proof"><button>Send</button></form>' +
+    '<script>addEventListener("load",()=>{const e=document.querySelector("input");e.focus();' +
+    'e.addEventListener("input",()=>fetch("/progress?value="+encodeURIComponent(e.value)));fetch("/ready")})</script>');
 });
-fixture.listen(0, '127.0.0.1');
-await once(fixture, 'listening');
-const fixtureUrl = `http://127.0.0.1:${fixture.address().port}`;
-
+server.listen(0, '127.0.0.1');
+await once(server, 'listening');
+const children = [];
 let logs = '';
-const gateway = spawn('node', ['openclaw.mjs', 'gateway', 'run'], {
-  cwd: '/app',
-  detached: true,
-  env: {
-    ...process.env,
-    OPENCLAW_CONFIG_PATH: `${stateDir}/openclaw.json`,
-    OPENCLAW_STATE_DIR: stateDir,
-    OPENCLAW_GATEWAY_TOKEN: token,
-    OPENCLAW_ALLOWED_ORIGINS: 'http://localhost:18789',
-    LITELLM_BASE_URL: 'http://127.0.0.1:9/v1',
-    LITELLM_API_KEY: 'test-only-key',
-    LITELLM_MODEL: 'deepseek/deepseek-v4-pro',
-    OPENCLAW_NO_RESPAWN: '1',
-    OPENCLAW_SKIP_CHANNELS: '1',
-    OPENCLAW_SKIP_GMAIL_WATCHER: '1',
-    OPENCLAW_SKIP_CRON: '1',
-    OPENCLAW_CODEX_DISCOVERY_LIVE: '0',
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
-const gatewayExit = once(gateway, 'exit');
-for (const output of [gateway.stdout, gateway.stderr]) {
-  output.on('data', chunk => { logs = (logs + chunk).slice(-64000); });
+const childEnv = { ...process.env };
+delete childEnv.DESKTOP_VNC_PASSWORD;
+function launch(command, args) {
+  const child = spawn(command, args, { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  children.push(child);
+  for (const output of [child.stdout, child.stderr]) output.on('data', chunk => { logs = (logs + chunk).slice(-64000); });
+  return child;
 }
-
-async function until(check, message, timeout = 120000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    if (gateway.exitCode !== null) throw new Error(`Gateway exited: ${gateway.exitCode}`);
+async function until(check, message, timeout = 30000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
     if (await check()) return;
-    await delay(200);
+    await delay(100);
   }
   throw new Error(message);
 }
-
 let client;
-let chromium;
+let nativeViewer;
 try {
-  await until(async () => {
-    try { return (await fetch('http://127.0.0.1:18789/healthz', { signal: AbortSignal.timeout(2000) })).ok; }
-    catch (error) {
-      if (['ECONNREFUSED', 'ECONNRESET'].includes(error.cause?.code) || error.name === 'TimeoutError') return false;
-      throw error;
-    }
-  }, 'Gateway did not become healthy');
-
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Gateway connection timed out')), 30000);
     client = new GatewayClient({
@@ -106,102 +64,99 @@ try {
     });
     client.start();
   });
-
-  const computer = await client.request('computer.status', {}, { timeoutMs: 90000 });
+  const computer = await client.request('computer.status', {}, { timeoutMs: 60000 });
   assert.equal(computer.available, true, JSON.stringify(computer));
   assert.equal(computer.computerUse.provider.id, 'cua-computer');
-  console.log('PASS: managed desktop and CUA provider are available');
-  const generation = computer.computerUse.provider.generation;
   const executionId = randomUUID();
   let sequence = 0;
   async function invoke(command, params) {
     const result = await client.request('computer.invoke', {
-      command, generation, params: { ...params, executionId },
-      timeoutMs: 60000, idempotencyKey: `desktop-smoke-${++sequence}`,
+      command, generation: computer.computerUse.provider.generation,
+      params: { ...params, executionId }, timeoutMs: 60000,
+      idempotencyKey: `desktop-smoke-${++sequence}`,
     }, { timeoutMs: 90000 });
     return result.payload;
   }
-
   const observation = await client.request('desktop.observe', { source: { kind: 'host' }, control: false }, { timeoutMs: 30000 });
   const viewer = new WebSocket(new URL(observation.wsPath, 'ws://127.0.0.1:18789'));
   viewer.binaryType = 'arraybuffer';
   try {
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Desktop stream did not send an RFB greeting')), 10000);
+      const timer = setTimeout(() => reject(new Error('WebUI desktop greeting timed out')), 10000);
       viewer.addEventListener('message', event => {
         clearTimeout(timer);
         try { assert.match(Buffer.from(event.data).toString('ascii'), /^RFB 003\./); resolve(); }
         catch (error) { reject(error); }
       }, { once: true });
-      viewer.addEventListener('error', () => { clearTimeout(timer); reject(new Error('Desktop stream failed')); }, { once: true });
+      viewer.addEventListener('error', () => { clearTimeout(timer); reject(new Error('WebUI desktop stream failed')); }, { once: true });
     });
-    console.log('PASS: WebUI desktop endpoint speaks RFB');
   } finally { viewer.close(); }
-
+  console.log('PASS: WebUI desktop endpoint reaches the persistent display');
   const screenshot = await invoke('screen.snapshot', { format: 'png', maxWidth: 1280 });
-  assert.ok(screenshot.displayFrameId, 'CUA must identify the observed desktop');
-  const png = Buffer.from(screenshot.base64, 'base64');
-  assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
-  assert.ok(png.readUInt32BE(16) > 0 && png.readUInt32BE(20) > 0);
-  console.log('PASS: CUA returned a PNG desktop screenshot');
+  assert.ok(screenshot.displayFrameId);
+  assert.equal(Buffer.from(screenshot.base64, 'base64').subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  console.log('PASS: native CUA returned a PNG desktop screenshot');
 
-  const displays = (await readdir('/tmp/.X11-unix')).filter(name => /^X\d+$/.test(name));
-  assert.equal(displays.length, 1, 'the test must use the one managed desktop');
-  chromium = spawn('chromium', ['--no-first-run', '--no-default-browser-check', fixtureUrl], {
-    env: { ...process.env, DISPLAY: `:${displays[0].slice(1)}` },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  for (const output of [chromium.stdout, chromium.stderr]) {
-    output.on('data', chunk => { logs = (logs + chunk).slice(-64000); });
-  }
-  await until(() => {
-    assert.equal(chromium.exitCode, null, 'Chromium exited before loading the fixture');
-    return pageLoaded;
-  }, 'Chromium did not load the test form', 30000);
+  const terminalTitle = `Desktop terminal ${randomUUID()}`;
+  launch('xfce4-terminal', ['--disable-server', '--title', terminalTitle]);
+  await until(async () => {
+    const result = await invoke('computer.act', { action: 'list_windows' });
+    assert.equal(result.ok, true);
+    return JSON.stringify(result.details).includes(terminalTitle);
+  }, 'CUA could not discover the terminal window');
+  console.log('PASS: terminal window is visible to CUA');
+  launch('openclaw-desktop-browser', [`http://127.0.0.1:${server.address().port}`]);
+  await until(() => loaded, 'The desktop browser did not load the fixture');
+  let browserWindow;
+  await until(async () => {
+    const windows = await invoke('computer.act', { action: 'list_windows' });
+    assert.ok(Array.isArray(windows.details?.windows), 'CUA must return real window records');
+    browserWindow = windows.details.windows.find(window => window.title?.includes('Desktop smoke test'));
+    return Boolean(browserWindow?.windowRef);
+  }, 'Browser window was not discovered by CUA');
+  assert.equal((await invoke('computer.act', { action: 'bring_to_front', windowRef: browserWindow.windowRef })).ok, true);
+
   let checkedRenderer = false;
   for (const pid of (await readdir('/proc')).filter(name => /^\d+$/.test(name))) {
     try {
-      if ((await readFile(`/proc/${pid}/comm`, 'utf8')).trim() !== 'chromium') continue;
-      // Chromium rewrites renderer argv as a space-separated process title.
+      if (!['chrome', 'chromium'].includes((await readFile(`/proc/${pid}/comm`, 'utf8')).trim())) continue;
       const commandLine = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).replaceAll('\0', ' ');
       if (!/(?:^|\s)--type=renderer(?:\s|$)/.test(commandLine)) continue;
       assert.doesNotMatch(commandLine, /(?:^|\s)--no-sandbox(?:\s|$)/);
       const status = await readFile(`/proc/${pid}/status`, 'utf8');
       assert.match(status, /^NoNewPrivs:\s+1$/m);
       assert.match(status, /^Seccomp:\s+2$/m);
-      const ownFilters = Number(ownStatus.match(/^Seccomp_filters:\s+(\d+)$/m)?.[1]);
-      const rendererFilters = Number(status.match(/^Seccomp_filters:\s+(\d+)$/m)?.[1]);
-      assert.ok(rendererFilters > ownFilters, 'Chromium must install its own sandbox filter');
+      assert.ok(Number(status.match(/^Seccomp_filters:\s+(\d+)$/m)?.[1]) >
+        Number(ownStatus.match(/^Seccomp_filters:\s+(\d+)$/m)?.[1]));
       checkedRenderer = true;
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
-  assert.equal(checkedRenderer, true, 'no sandboxed Chromium renderer found');
-  console.log('PASS: Chromium renderer has its own seccomp sandbox and no-new-privileges');
-  const marker = `desktop-proof-${randomUUID()}`;
-  const typed = await invoke('computer.act', { action: 'type', text: marker });
-  assert.equal(typed.ok, true, JSON.stringify(typed));
-  const entered = await invoke('computer.act', { action: 'key', keys: 'Return' });
-  assert.equal(entered.ok, true, JSON.stringify(entered));
-  await until(() => submitted !== undefined, 'CUA did not submit the form', 10000);
-  assert.equal(submitted, marker);
-  console.log('PASS: CUA typed and submitted the expected text in desktop Chromium');
-  const files = await readdir('/home/node/.openclaw/desktop/chromium');
-  assert.ok(files.includes('Default'), 'Chromium must use the persistent profile directory');
-  console.log('PASS: Chromium used the profile inside openclaw_state');
+  assert.equal(checkedRenderer, true);
+  console.log('PASS: browser renderer has its own seccomp sandbox and no-new-privileges');
+  nativeViewer = await connectVnc({ password: process.env.VNC_TEST_PASSWORD ?? 'testpass' });
+  assert.equal(nativeViewer.authenticated, true);
+  const prefix = `vnc-${randomUUID()}`;
+  const suffix = `-cua-${randomUUID()}`;
+  nativeViewer.type(prefix);
+  await until(() => input === prefix, 'Native VNC input did not reach the browser form');
+  assert.equal((await invoke('computer.act', { action: 'type', text: suffix })).ok, true);
+  await until(() => input === prefix + suffix, 'CUA did not append to the same browser input');
+  assert.equal((await invoke('computer.act', { action: 'key', keys: 'Return' })).ok, true);
+  await until(() => submitted !== undefined, 'The shared form was not submitted');
+  assert.equal(submitted, prefix + suffix);
+  console.log('PASS: native VNC and CUA submitted the exact combined marker');
+  const profile = process.arch === 'x64' ? '/home/node/.openclaw/desktop/google-chrome' : '/home/node/.openclaw/desktop/chromium';
+  assert.ok((await readdir(profile)).includes('Default'));
+  console.log('PASS: browser profile is inside the persistent state volume');
   await invoke('computer.act', { action: '__close_execution', reason: 'smoke-test-complete' });
 } catch (error) {
   console.error(logs.replaceAll(token, '<REDACTED>'));
   throw error;
 } finally {
-  chromium?.kill('SIGTERM');
+  nativeViewer?.close();
+  for (const child of children) child.kill('SIGTERM');
   client?.stop();
-  fixture.closeAllConnections();
-  fixture.close();
-  if (gateway.exitCode === null) {
-    process.kill(-gateway.pid, 'SIGTERM');
-    const stopped = await Promise.race([gatewayExit.then(() => true), delay(10000).then(() => false)]);
-    if (!stopped) { process.kill(-gateway.pid, 'SIGKILL'); await gatewayExit; }
-  }
+  server.closeAllConnections();
+  server.close();
+  clearTimeout(watchdog);
 }

@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+if command -v google-chrome-stable >/dev/null 2>&1; then
+    exec google-chrome-stable --no-first-run --no-default-browser-check "$@"
+fi
+exec chromium --no-first-run --no-default-browser-check "$@"

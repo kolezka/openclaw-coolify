@@ -5,6 +5,9 @@ services:
       args:
         OPENCLAW_VERSION: ${OPENCLAW_VERSION:-2026.10.1}
     restart: unless-stopped
+    stop_grace_period: 360s
+    tmpfs:
+      - /run/openclaw-desktop:rw,mode=0700,uid=1000,gid=1000
     # Chromium uses the hostname to recognize its own stale profile lock.
     hostname: openclaw-desktop
     shm_size: "1gb"
@@ -17,6 +20,8 @@ services:
       LITELLM_BASE_URL: ${LITELLM_BASE_URL:?required}
       LITELLM_API_KEY: ${LITELLM_API_KEY:?required}
       LITELLM_MODEL: ${LITELLM_MODEL:?required}
+      DESKTOP_VNC_PASSWORD: ${DESKTOP_VNC_PASSWORD:?required}
+      DESKTOP_VNC_BIND_ADDRESS: ${DESKTOP_VNC_BIND_ADDRESS:-127.0.0.1}
     expose:
       - "18789"
       - "18790"
@@ -25,6 +30,7 @@ services:
       # Deployment fix a2af273 reported that artifacts needed this published port.
       # Verify the running version and generated URL before changing it.
       - "127.0.0.1:18790:18790"
+      - "${DESKTOP_VNC_BIND_ADDRESS:-127.0.0.1}:${DESKTOP_VNC_PORT:-5901}:5900"
     volumes:
       - openclaw_state:/home/node/.openclaw
 

@@ -12,6 +12,7 @@ function compose(overrides = {}) {
     'compose', '--project-directory', root, 'config', '--format', 'json',
   ], {
     encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
@@ -20,16 +21,17 @@ function compose(overrides = {}) {
       LITELLM_BASE_URL: 'https://test.invalid/v1',
       LITELLM_API_KEY: 'test-only-key',
       LITELLM_MODEL: 'test-only-model',
+      DESKTOP_VNC_PASSWORD: 'testpass',
       ...overrides,
     },
   }));
 }
 
-test('a new deployment selects the managed desktop, not an external VNC display', () => {
+test('a new deployment attaches WebUI to the persistent display', () => {
   assert.equal(seed.desktop?.host?.enabled, true);
-  assert.equal(seed.desktop?.host?.managed, true);
-  assert.equal(seed.desktop.host.port, undefined);
-  assert.equal(seed.desktop.host.passwordFile, undefined);
+  assert.equal(seed.desktop?.host?.managed, false);
+  assert.equal(seed.desktop.host.port, 5900);
+  assert.equal(seed.desktop.host.passwordFile, '/run/openclaw-desktop/vnc-password.txt');
 });
 
 test('the gateway explicitly enables its computer provider and tool', () => {
@@ -43,6 +45,7 @@ test('desktop deployment retains private ports and the existing state volume', (
   assert.deepEqual(service.ports.map(p => [p.host_ip, p.published, p.target]), [
     ['127.0.0.1', '18789', 18789],
     ['127.0.0.1', '18790', 18790],
+    ['127.0.0.1', '5901', 5900],
   ]);
   assert.deepEqual(service.volumes.map(v => [v.type, v.source, v.target]), [
     ['volume', 'openclaw_state', '/home/node/.openclaw'],
@@ -67,7 +70,17 @@ test('desktop keeps seccomp confinement and prevents privilege escalation', () =
   }
 });
 
-test('Compose accepts an explicit image version without exposing desktop ports', () => {
+test('runtime secrets use private tmpfs and LAN publication must be explicit', () => {
+  const service = compose({ DESKTOP_VNC_BIND_ADDRESS: '192.168.42.10' }).services.openclaw;
+  const vnc = service.ports.find(port => port.target === 5900);
+  assert.equal(vnc?.host_ip, '192.168.42.10');
+  assert.ok(service.tmpfs?.some(mount => mount.startsWith('/run/openclaw-desktop:') &&
+    /mode=0?700/.test(mount) && mount.includes('uid=1000') && mount.includes('gid=1000')));
+  assert.ok(!Object.hasOwn(service.build.args, 'DESKTOP_VNC_PASSWORD'));
+  assert.throws(() => compose({ DESKTOP_VNC_PASSWORD: '' }), /DESKTOP_VNC_PASSWORD/);
+});
+
+test('Compose accepts an explicit image version without adding VNC to the proxy exposure list', () => {
   const service = compose({ OPENCLAW_VERSION: 'test-version' }).services.openclaw;
   assert.equal(service.build.args.OPENCLAW_VERSION, 'test-version');
   assert.deepEqual(service.expose, ['18789', '18790']);
