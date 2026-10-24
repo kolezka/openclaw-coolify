@@ -56,7 +56,9 @@ VNC through the host's loopback port. In-container VNC remains password-protecte
 for the authenticated gateway viewer, and X11 clients require the runtime cookie.
 
 Set the VNC password through the secret UI as runtime-only, never a build variable
-or a shell argument. Use exactly eight printable ASCII bytes. Verify the generated
+or a shell argument. Use exactly eight printable ASCII bytes. Compose does not require
+it, because Coolify interpolates the file during the build without runtime-only values;
+the container refuses a missing or invalid password at startup. Verify the generated
 container retains the private runtime tmpfs, seccomp, no-new-privileges, state
 volume, brain overlay and shutdown budget.
 
