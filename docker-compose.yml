@@ -20,7 +20,8 @@ services:
       LITELLM_BASE_URL: ${LITELLM_BASE_URL:?required}
       LITELLM_API_KEY: ${LITELLM_API_KEY:?required}
       LITELLM_MODEL: ${LITELLM_MODEL:?required}
-      DESKTOP_VNC_PASSWORD: ${DESKTOP_VNC_PASSWORD:?required}
+      # Runtime-only: Coolify builds without it. The container refuses a bad value at startup.
+      DESKTOP_VNC_PASSWORD: ${DESKTOP_VNC_PASSWORD:-}
       DESKTOP_VNC_BIND_ADDRESS: ${DESKTOP_VNC_BIND_ADDRESS:-127.0.0.1}
     expose:
       - "18789"

@@ -7,24 +7,23 @@ import test from 'node:test';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const seed = JSON.parse(readFileSync(new URL('../openclaw.json', import.meta.url), 'utf8'));
 
+// An override of undefined removes that variable from the environment.
 function compose(overrides = {}) {
+  const env = {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    OPENCLAW_GATEWAY_TOKEN: 'test-only-token',
+    OPENCLAW_ALLOWED_ORIGINS: 'https://test.invalid',
+    LITELLM_BASE_URL: 'https://test.invalid/v1',
+    LITELLM_API_KEY: 'test-only-key',
+    LITELLM_MODEL: 'test-only-model',
+    DESKTOP_VNC_PASSWORD: 'testpass',
+    ...overrides,
+  };
+  for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
   return JSON.parse(execFileSync('docker', [
     'compose', '--project-directory', root, 'config', '--format', 'json',
-  ], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
-      OPENCLAW_GATEWAY_TOKEN: 'test-only-token',
-      OPENCLAW_ALLOWED_ORIGINS: 'https://test.invalid',
-      LITELLM_BASE_URL: 'https://test.invalid/v1',
-      LITELLM_API_KEY: 'test-only-key',
-      LITELLM_MODEL: 'test-only-model',
-      DESKTOP_VNC_PASSWORD: 'testpass',
-      ...overrides,
-    },
-  }));
+  ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env }));
 }
 
 test('a new deployment attaches WebUI to the persistent display', () => {
@@ -77,7 +76,16 @@ test('runtime secrets use private tmpfs and LAN publication must be explicit', (
   assert.ok(service.tmpfs?.some(mount => mount.startsWith('/run/openclaw-desktop:') &&
     /mode=0?700/.test(mount) && mount.includes('uid=1000') && mount.includes('gid=1000')));
   assert.ok(!Object.hasOwn(service.build.args, 'DESKTOP_VNC_PASSWORD'));
-  assert.throws(() => compose({ DESKTOP_VNC_PASSWORD: '' }), /DESKTOP_VNC_PASSWORD/);
+});
+
+// Coolify interpolates the whole file during the build, where runtime-only secrets are absent.
+// The container still refuses a missing password at startup (persistent-desktop.test.mjs).
+test('Compose resolves for a build that lacks runtime-only secrets', () => {
+  for (const password of [undefined, '']) {
+    const service = compose({ DESKTOP_VNC_PASSWORD: password }).services.openclaw;
+    assert.ok(!Object.hasOwn(service.build.args, 'DESKTOP_VNC_PASSWORD'));
+    assert.equal(service.environment.DESKTOP_VNC_PASSWORD, '');
+  }
 });
 
 test('Compose accepts an explicit image version without adding VNC to the proxy exposure list', () => {
