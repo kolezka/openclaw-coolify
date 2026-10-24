@@ -6,7 +6,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         chromium chromium-sandbox \
         dbus-daemon dbus-x11 dbus-bin \
-        x11-utils \
+        x11-utils xauth \
         fonts-liberation fonts-noto-color-emoji \
         tigervnc-standalone-server tigervnc-tools \
         xfce4 xfce4-terminal at-spi2-core \
@@ -38,6 +38,7 @@ RUN chmod 0755 /usr/local/bin/openclaw-desktop-browser \
     /app/deploy/start-desktop.sh /app/deploy/run-xfce.sh /app/deploy/launchers/*.desktop
 ENV DISPLAY=:1 \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/run/openclaw-desktop/bus \
+    XAUTHORITY=/run/openclaw-desktop/Xauthority \
     CHROME_USER_DATA_DIR=/home/node/.openclaw/desktop/google-chrome
 USER node
 

@@ -4,6 +4,7 @@ umask 077
 
 export DISPLAY=:1
 export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/openclaw-desktop/bus
+export XAUTHORITY=/run/openclaw-desktop/Xauthority
 node /app/deploy/prepare-runtime.mjs
 unset DESKTOP_VNC_PASSWORD
 
@@ -44,9 +45,14 @@ trap 'shutdown $?' EXIT
 
 dbus-daemon --session --nofork --nopidfile --address="$DBUS_SESSION_BUS_ADDRESS" &
 bus_pid=$!
-Xtigervnc :1 -geometry 1920x1080 -depth 24 -localhost no -rfbport 5900 \
+localhost=yes
+case "${DESKTOP_VNC_BIND_ADDRESS:-127.0.0.1}" in
+    127.*) ;;
+    *) localhost=no ;;
+esac
+Xtigervnc :1 -geometry 1920x1080 -depth 24 -localhost "$localhost" -rfbport 5900 \
     -SecurityTypes VncAuth -PasswordFile /run/openclaw-desktop/vnc-password.hash \
-    -AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac &
+    -AlwaysShared -AcceptSetDesktopSize -nolisten tcp -auth "$XAUTHORITY" &
 vnc_pid=$!
 
 deadline=$((SECONDS + 20))

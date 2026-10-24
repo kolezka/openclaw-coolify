@@ -20,7 +20,7 @@ export async function dockerWithTimeout(timeout, ...args) {
 }
 export const docker = (...args) => dockerWithTimeout(30000, ...args);
 
-export async function fixture(t, { password = 'testpass', omitPassword = false, bindAddress = '127.0.0.1', runtimeTmpfs = true, configSource } = {}) {
+export async function fixture(t, { password = 'testpass', omitPassword = false, bindAddress = '127.0.0.1', runtimeTmpfs = true, configSource, network = 'none' } = {}) {
   const name = `openclaw-persistent-test-${randomUUID()}`;
   let directory;
   let created = false;
@@ -48,7 +48,7 @@ export async function fixture(t, { password = 'testpass', omitPassword = false, 
     DESKTOP_VNC_BIND_ADDRESS: bindAddress,
     ...omitPassword ? {} : { DESKTOP_VNC_PASSWORD: password },
   };
-  await docker('create', '--name', name, '--hostname', 'openclaw-desktop', '--network', 'none',
+  await docker('create', '--name', name, '--hostname', 'openclaw-desktop', '--network', network,
     '--shm-size=1g', '--security-opt', 'no-new-privileges:true',
     ...resourceLimits,
     '--security-opt', `seccomp=${root}desktop/chromium-seccomp.json`,
