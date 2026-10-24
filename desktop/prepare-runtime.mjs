@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, readFile, rm, statfs, writeFile } from 'node:fs/promises';
 import { createConnection, isIP } from 'node:net';
@@ -74,6 +75,14 @@ export async function prepareDesktopRuntime(env = process.env) {
   }
   await writeFile(`${runtime}/vnc-password.txt`, env.DESKTOP_VNC_PASSWORD, { flag: 'wx', mode: 0o600 });
   await writeFile(`${runtime}/vnc-password.hash`, result.stdout, { flag: 'wx', mode: 0o600 });
+  const authority = `${runtime}/Xauthority`;
+  await writeFile(authority, '', { flag: 'wx', mode: 0o600 });
+  const xauth = spawnSync('xauth', ['-q', '-f', authority], {
+    input: `add :1 MIT-MAGIC-COOKIE-1 ${randomBytes(16).toString('hex')}\n`,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  if (xauth.error || xauth.status !== 0) throw new StartupError('Could not prepare X11 authentication');
+  await chmod(authority, 0o600);
   // Retained volumes do not receive directories added to a newer image.
   for (const name of ['Desktop', 'Downloads', 'Documents', 'xfce4']) {
     await mkdir(`/home/node/.openclaw/desktop/${name}`, { recursive: true, mode: 0o700 });

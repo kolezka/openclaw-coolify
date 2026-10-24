@@ -1,12 +1,15 @@
 """Opt-in local Docker acceptance; never pulls/builds or uses existing state."""
 
 import argparse
+import fnmatch
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import shlex
 import subprocess
+import tarfile
 import tempfile
 import time
 import unittest
@@ -15,6 +18,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 STATE = "/home/node/.openclaw"
 BRAIN = "/home/node/brain"
+SEED = "/app/deploy/openclaw.json"
 DOCKER = ["docker", "--context", "desktop-linux"]
 ENV = {key: os.environ[key] for key in ("PATH", "HOME") if key in os.environ}
 ENV.update({
@@ -24,6 +28,9 @@ ENV.update({
     "LITELLM_BASE_URL": "http://127.0.0.1:9/v1",
     "LITELLM_API_KEY": "brain-runtime-fixture-key-not-a-secret",
     "LITELLM_MODEL": "deepseek/deepseek-v4-pro",
+    # Dummy value: exactly eight printable ASCII bytes, as prepare-runtime requires.
+    "DESKTOP_VNC_PASSWORD": "fixture8",
+    "DESKTOP_VNC_BIND_ADDRESS": "127.0.0.1",
 })
 
 
@@ -40,8 +47,150 @@ def docker(*args, **kwargs):
     return run([*DOCKER, *args], **kwargs)
 
 
+def docker_bytes(*args, timeout=60):
+    command = [*DOCKER, *args]
+    print("COMMAND", shlex.join(command), flush=True)
+    result = subprocess.run(command, cwd=ROOT, env=ENV, capture_output=True, timeout=timeout)
+    if result.returncode:
+        raise AssertionError(f"exit={result.returncode}\n{result.stderr.decode(errors='replace')}")
+    return result.stdout
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def dockerfile_lines(text):
+    """Logical Dockerfile instructions with line continuations joined."""
+    lines, current = [], ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not current and (not stripped or stripped.startswith("#")):
+            continue
+        current += " " + stripped.removesuffix("\\").strip() if current else stripped.removesuffix("\\").strip()
+        if not stripped.endswith("\\"):
+            lines.append(current)
+            current = ""
+    return lines
+
+
+def dockerfile_exec_form(text, instruction):
+    values = [json.loads(line[len(instruction) + 1:]) for line in dockerfile_lines(text)
+              if line.startswith(instruction + " ")]
+    if len(values) != 1:
+        raise AssertionError(f"Dockerfile must contain exactly one exec-form {instruction}")
+    return values[0]
+
+
+def dockerfile_copies(text, root=ROOT):
+    """Map every image path written by a COPY to its source file."""
+    files = {}
+    for line in dockerfile_lines(text):
+        if not line.startswith("COPY "):
+            continue
+        tokens = shlex.split(line)[1:]
+        if any(token.startswith("--from") for token in tokens):
+            raise AssertionError("multi-stage COPY is not supported by this check: " + line)
+        tokens = [token for token in tokens if not token.startswith("--")]
+        *sources, target = tokens
+        for source in sources:
+            path = root / source
+            if path.is_dir():
+                for item in sorted(path.rglob("*")):
+                    if item.is_file():
+                        files[target.rstrip("/") + "/" + item.relative_to(path).as_posix()] = item
+            elif target.endswith("/"):
+                files[target + path.name] = path
+            elif len(sources) == 1:
+                files[target] = path
+            else:
+                raise AssertionError("multi-source COPY needs a directory target: " + line)
+    return files
+
+
+def dockerfile_executables(text, targets):
+    """Image paths the Dockerfile marks executable with `RUN chmod 0755`."""
+    patterns = []
+    for line in dockerfile_lines(text):
+        tokens = shlex.split(line)
+        if tokens[:3] == ["RUN", "chmod", "0755"]:
+            patterns += tokens[3:]
+    return {target for target in targets if any(fnmatch.fnmatchcase(target, pattern) for pattern in patterns)}
+
+
+def image_config_mismatches(config, text, version):
+    problems = []
+    for key, instruction in (("Entrypoint", "ENTRYPOINT"), ("Cmd", "CMD")):
+        expected = dockerfile_exec_form(text, instruction)
+        if config.get(key) != expected:
+            problems.append(f"{instruction} {config.get(key)!r} != source {expected!r}")
+    if config.get("User") != "node":
+        problems.append(f"User {config.get('User')!r} != 'node'")
+    if (config.get("Labels") or {}).get("org.opencontainers.image.version") != version:
+        problems.append("image is not the target OpenClaw release " + version)
+    return problems
+
+
+def runtime_file_mismatches(expected, executables, actual):
+    """expected: image path -> source bytes; actual: image path -> (kind, mode, bytes)."""
+    problems = []
+    for target, data in sorted(expected.items()):
+        if target not in actual:
+            problems.append(f"{target} missing from image")
+            continue
+        kind, mode, content = actual[target]
+        if kind != "file":
+            problems.append(f"{target} is a {kind}, not a file")
+        elif content != data:
+            problems.append(f"{target} sha256 {digest(content)} != source {digest(data)}")
+        elif target in executables and mode & 0o111 != 0o111:
+            problems.append(f"{target} mode {mode:o} is not executable")
+    # A stale image may carry deploy files the current source no longer ships.
+    for target in sorted(actual):
+        if (target.startswith("/app/deploy/") and actual[target][0] == "file"
+                and target not in expected):
+            problems.append(f"{target} is in the image but not copied by the Dockerfile")
+    return problems
+
+
+def tar_tree(data, image_path):
+    """Decode `docker cp <container>:<path> -` output into absolute image paths."""
+    parent = image_path.rstrip("/").rsplit("/", 1)[0] or ""
+    tree = {}
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        for member in archive.getmembers():
+            path = parent + "/" + member.name.rstrip("/")
+            if member.isfile():
+                tree[path] = ("file", member.mode & 0o7777, archive.extractfile(member).read())
+            elif member.isdir():
+                tree[path] = ("dir", member.mode & 0o7777, b"")
+            elif member.issym():
+                tree[path] = ("symlink", 0, member.linkname.encode())
+            else:
+                tree[path] = ("other", member.mode & 0o7777, b"")
+    return tree
+
+
+def write_deploy_without_seed(tree, directory, seed="/app/deploy/openclaw.json"):
+    """Recreate the image's own /app/deploy minus the seed, so only the seed is hidden."""
+    written = set()
+    for path, (kind, mode, content) in sorted(tree.items()):
+        if path == "/app/deploy" or path == seed:
+            continue
+        if not path.startswith("/app/deploy/"):
+            raise AssertionError("unexpected path in deploy tree: " + path)
+        local = directory / path.removeprefix("/app/deploy/")
+        if kind == "dir":
+            local.mkdir(parents=True, exist_ok=True)
+            local.chmod(mode & 0o755 | 0o700)
+        elif kind == "file":
+            local.parent.mkdir(parents=True, exist_ok=True)
+            local.write_bytes(content)
+            local.chmod(mode & 0o755 | 0o400)
+            written.add(path)
+        else:
+            raise AssertionError(f"{path} is a {kind}; refusing to approximate it in the fixture")
+    return written
 
 
 class BrainRuntimeTests(unittest.TestCase):
@@ -55,13 +204,38 @@ class BrainRuntimeTests(unittest.TestCase):
         print("ENGINE", docker("info", "--format", "{{.OSType}}/{{.Architecture}}").stdout.strip())
         image = json.loads(docker("image", "inspect", cls.image).stdout)[0]
         cls.image = image["Id"]
-        expected = json.loads(next(line[4:] for line in (ROOT / "Dockerfile").read_text().splitlines()
-                                   if line.startswith("CMD ")))
-        if image["Config"]["Cmd"] != expected or image["Config"]["User"] != "node":
-            raise AssertionError("image CMD/User does not match the current Dockerfile")
-        if image["Config"]["Labels"]["org.opencontainers.image.version"] != ENV["OPENCLAW_VERSION"]:
-            raise AssertionError("image is not the target OpenClaw release")
-        print("IMAGE", cls.image, image["Architecture"], "CMD matches source", flush=True)
+        source = (ROOT / "Dockerfile").read_text()
+        problems = image_config_mismatches(image["Config"], source, ENV["OPENCLAW_VERSION"])
+        if problems:
+            raise AssertionError("image does not match the current Dockerfile:\n" + "\n".join(problems))
+        cls.entrypoint = dockerfile_exec_form(source, "ENTRYPOINT")
+        copies = dockerfile_copies(source)
+        expected = {target: path.read_bytes() for target, path in copies.items()}
+        executables = dockerfile_executables(source, expected)
+        roots = sorted({"/app/deploy" if target.startswith("/app/deploy/") else target
+                        for target in expected} | {STATE})
+        # Never started: only used to read image files with `docker cp`.
+        name = "brain-acceptance-" + uuid.uuid4().hex[:16] + "-files"
+        docker("create", "--pull", "never", "--network", "none",
+               "--label", f"local.brain-acceptance={name}", "--name", name, cls.image)
+        try:
+            trees = {root: tar_tree(docker_bytes("cp", f"{name}:{root}", "-"), root) for root in roots}
+        finally:
+            info = json.loads(docker("inspect", name).stdout)[0]
+            if info["Config"]["Labels"].get("local.brain-acceptance") != name or info["State"]["StartedAt"][:4] != "0001":
+                raise AssertionError("refusing to remove an inspection container this suite did not own")
+            docker("rm", info["Id"])
+        actual = {path: entry for root in roots if root != STATE for path, entry in trees[root].items()}
+        problems = runtime_file_mismatches(expected, executables, actual)
+        if problems:
+            raise AssertionError("image runtime files do not match this checkout:\n" + "\n".join(problems))
+        cls.deploy_tree = trees["/app/deploy"]
+        cls.image_state = trees[STATE]
+        for target in sorted(expected):
+            print("SOURCE/IMAGE SHA256", target, digest(expected[target]),
+                  "exec" if target in executables else "", flush=True)
+        print("IMAGE", cls.image, image["Architecture"], "ENTRYPOINT, CMD and",
+              len(expected), "runtime files match source", flush=True)
 
     def setUp(self):
         self.project = "brain-acceptance-" + uuid.uuid4().hex[:16]
@@ -122,10 +296,19 @@ class BrainRuntimeTests(unittest.TestCase):
         if state_read_only:
             mounts.append({"type": "volume", "source": "openclaw_state", "target": STATE,
                            "read_only": True})
+        self.seedless = None
         if hide_seed:
-            empty = self.root / "empty seed"
-            empty.mkdir(exist_ok=True)
-            mounts.append({"type": "bind", "source": str(empty), "target": "/app/deploy",
+            # Hide only the seed: an empty /app/deploy would also hide the entrypoint.
+            self.seedless = self.root / "deploy without seed"
+            if not self.seedless.exists():
+                self.seedless.mkdir()
+                written = write_deploy_without_seed(self.deploy_tree, self.seedless)
+                image_files = {path for path, entry in self.deploy_tree.items() if entry[0] == "file"}
+                self.assertEqual(written, image_files - {SEED})
+                for argument in self.entrypoint:
+                    if argument.startswith("/app/deploy/"):
+                        self.assertIn(argument, written)
+            mounts.append({"type": "bind", "source": str(self.seedless), "target": "/app/deploy",
                            "read_only": True, "bind": {"create_host_path": False}})
         if mounts:
             service["volumes"] = mounts
@@ -168,7 +351,16 @@ class BrainRuntimeTests(unittest.TestCase):
             self.assertEqual(mounts[STATE]["Name"], self.volume)
             self.assertEqual(mounts[BRAIN]["Source"], str(self.brain))
             self.assertTrue(mounts[BRAIN]["RW"])
+            if self.seedless:
+                self.assertEqual(mounts["/app/deploy"]["Source"], str(self.seedless))
+                self.assertFalse(mounts["/app/deploy"]["RW"])
+            else:
+                self.assertNotIn("/app/deploy", mounts)
         return result
+
+    def state_snapshot(self):
+        """Decoded state volume tree; works on created and exited containers."""
+        return tar_tree(docker_bytes("cp", f"{self.container}:{STATE}", "-"), STATE)
 
     def start(self):
         docker("start", self.container)
@@ -288,27 +480,41 @@ class BrainRuntimeTests(unittest.TestCase):
             stored = self.stored_config()
             print("PRESERVED SHA256 expected/stored", digest(preserved), digest(stored), "seed hidden", hide_seed)
             self.assertEqual(stored, preserved)
+            # Positive control: the real entrypoint ran while only the seed was hidden.
+            visible = json.loads(self.node(
+                "const fs=require('fs'); console.log(JSON.stringify(" +
+                json.dumps([SEED, *[a for a in self.entrypoint if a.startswith("/")]]) +
+                ".map(p => fs.existsSync(p))))").stdout)
+            self.assertEqual(visible[0], not hide_seed)
+            self.assertTrue(all(visible[1:]), visible)
         print("PASS real image first boot and existing config preserved with/without seed", flush=True)
 
-    def assert_seed_failure(self):
+    def assert_preflight_failure(self, reason):
+        """Fresh state: the entrypoint preflight reads the seed before any state write
+        or the CMD copy, so failure must stop there with its own diagnostic."""
         self.create()
+        before = self.state_snapshot()
+        # A fresh volume holds exactly the image's copied-up state, without config.
+        self.assertEqual(before, self.image_state)
+        self.assertNotIn(STATE + "/openclaw.json", before)
         self.start()
         result = docker("wait", self.container, timeout=30)
-        self.assertNotEqual(int(result.stdout.strip()), 0)
         logs = docker("logs", self.container)
         text = logs.stdout + logs.stderr
-        self.assertIn("cp:", text)
-        self.assertNotIn("[gateway]", text)
-        print("PASS first boot failed closed; exit", result.stdout.strip(), text.strip(), flush=True)
-        return text
+        self.assertEqual((int(result.stdout.strip()), text), (1, reason + "\n"))
+        after = self.state_snapshot()
+        self.assertNotIn(STATE + "/openclaw.json", after)
+        self.assertEqual(after, before)
+        print("PASS preflight failed closed; exit", result.stdout.strip(), "log", repr(text),
+              "state unchanged:", len(after), "entries", flush=True)
 
     def test_first_boot_readonly_state_fails(self):
         self.configure(state_read_only=True)
-        self.assertIn("Read-only file system", self.assert_seed_failure())
+        self.assert_preflight_failure("Desktop initialization failed (EROFS)")
 
     def test_first_boot_missing_seed_fails(self):
         self.configure(hide_seed=True)
-        self.assertIn("No such file or directory", self.assert_seed_failure())
+        self.assert_preflight_failure("Desktop initialization failed (ENOENT)")
 
 
 if __name__ == "__main__":

@@ -63,10 +63,17 @@ OpenClaw pin is `2026.10.1`; Host Desktop and Linux CUA remain experimental upst
 
 ### Connect from macOS or WebUI
 
+The default `DESKTOP_VNC_BIND_ADDRESS=127.0.0.1` is **WebUI-only**: VNC listens on
+loopback inside the container. Other Docker containers cannot connect directly,
+and the host's published loopback port cannot forward into that listener either.
+Use the authenticated OpenClaw Desktop panel in this mode. Compose still reserves
+the host loopback mapping; a host-port connection alone is not a readiness check.
+
 Set `DESKTOP_VNC_BIND_ADDRESS` to the Docker host's private IPv4 address only after
-checking the host firewall and Docker-network boundaries. Its default is
-`127.0.0.1`, which intentionally does not allow a remote Mac to connect. The default
-host port is `5901`; `DESKTOP_VNC_PORT` can change that publication.
+checking host filtering and Docker-peer isolation. This explicitly enables VNC on
+the container's network interfaces so Docker can publish it. The default host port
+is `5901`; `DESKTOP_VNC_PORT` can change that publication. This host address is not
+an address to pass to TigerVNC's `-interface` inside a bridge-network container.
 
 On the Mac, replace this example address with the host's actual LAN address:
 
@@ -89,7 +96,11 @@ gateway password. Do not put it in a URL, command argument, build argument or lo
 The plaintext file used by the WebUI and TigerVNC's password representation live
 in owner-only tmpfs under `/run/openclaw-desktop`. Startup refuses to store them on
 persistent disk. The secret is removed from supervised child environments; it is
-still an operator-managed Docker/Coolify environment secret.
+still an operator-managed Docker/Coolify environment secret. X11 uses a separate
+random cookie in `/run/openclaw-desktop/Xauthority`, shared through `XAUTHORITY`
+by the gateway, XFCE and local clients. Clients without that authority are rejected;
+X11 TCP listening remains disabled. This is not isolation from other processes
+running as the same container user.
 
 Classic VNC does not encrypt screen/input traffic. Anyone with its password can
 operate the terminal as `node` and access container state. Bind only the intended
@@ -128,6 +139,8 @@ resolve conflicts rather than overwriting them. This migration is not automatic.
 Do not deploy this image over an on-demand managed configuration without preparing
 the transition. Startup deliberately rejects that mismatch. Do not replace live
 `openclaw.json` with the seed: that loses agents, models, memory and access rules.
+See the [rollout and rollback gates](docs/desktop-rollout.md) for the WebUI-first
+sequence, file preservation and the separate LAN-isolation approval.
 
 1. Test the candidate image in isolation. Rehearse older OpenClaw upgrades on a
    private state copy; the existing shell CMD does not trigger the upstream
@@ -216,8 +229,10 @@ Labs. Preserve the state volume and user files.
 
 ### Image and policy checks
 
-Tests use disposable containers, dummy credentials, private test volumes and
-`--network none`, without publishing ports or mounting production state. They test
+Tests use disposable containers, dummy credentials and private test volumes,
+without publishing ports or mounting production state. Most use `--network none`;
+the peer-access regression uses an internal, disposable Docker network and checks
+gateway health as a positive control before testing VNC refusal. They test
 the actual entrypoint, VncAuth, process lifetimes, retained configuration, launchers,
 browser sandbox, combined native-VNC/CUA input and real parent/child tool policies.
 No LLM credentials are used. The Node tests require a built image and Docker Compose.
@@ -354,20 +369,29 @@ python3 -B tests/brain-runtime.py --image <source-matched-local-image>
 ```
 
 The suite explicitly uses the local `desktop-linux` Docker context, never pulls or
-builds an image, and rejects an image with the wrong startup command, user or release.
-It uses the real base and brain Compose files. A temporary third overlay removes
-published ports, disables networking and restart, and selects the supplied image.
-The hostname, shared memory, security options and named state mount remain intact.
-All credentials and host files are disposable fixtures. Resource names are unique;
-cleanup checks their identities before removing only those test containers and volumes.
-The supplied image is not removed.
+builds an image, and rejects an image whose `ENTRYPOINT`, `CMD`, user or release
+differs from this checkout. It also reads every file the Dockerfile copies out of a
+never-started container and compares its SHA-256 (and executable bit) with the
+source, and rejects stale extra files under `/app/deploy`, so an older image fails
+before any test runs. It uses the real base and brain Compose files. A temporary
+third overlay removes published ports, disables networking and restart, and selects
+the supplied image. The hostname, shared memory, security options and named state
+mount remain intact. All credentials, including the eight-byte VNC password, and host
+files are disposable fixtures. Resource names are unique; cleanup checks their
+identities before removing only those test containers and volumes. The supplied image
+is not removed.
 
 The six runtime tests check decoded host/container reads and writes through a path
 with spaces, UID/GID and installed desktop packages, a missing source that stays
 missing, and a nonroot permission error after a successful write control. They also
 start the real image entrypoint and command: a fresh seed must produce a live gateway,
-failed copies must exit with visible errors, and customized config must survive
-container replacement both with and without an available seed.
+and customized config must survive container replacement both with and without an
+available seed. To hide the seed, the suite mounts a copy of the image's own
+`/app/deploy` without `openclaw.json`, so the entrypoint and other runtime files stay
+present. On a fresh volume the entrypoint preflight reads the seed before any state
+write or the `CMD` copy, so a missing seed or read-only state stops there: exit 1,
+exactly `Desktop initialization failed (ENOENT)` or `(EROFS)`, no gateway, and a state
+volume identical to the image's initial copy.
 
 This is separate from the desktop CUA smoke tests above. Local Docker Desktop results
 do not prove Linux/amd64 host permissions, Coolify overlay handling, existing-volume
